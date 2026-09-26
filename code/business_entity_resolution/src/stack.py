@@ -94,14 +94,14 @@ def main(use_rev: bool):
     val = df.filter(pl.col("part") == "val")
     fold = np.array([int(_bucket(e) * 1000) % K_FOLDS for e in train["s1_id"]])
     stop = np.array([_bucket(e) >= 0.16 for e in train["s1_id"]])
-    X, y = train.select(feats1).to_numpy(np.float32), train["label"].to_numpy()
+    X, y = train.select(pl.col(feats1).cast(pl.Float32)).to_numpy(), train["label"].to_numpy()
 
     # stage 1 on all training entities -> used for validation (and test)
     m1 = fit(X[~stop], y[~stop], feats1, es=(X[stop], y[stop]))
     rounds = m1.best_iteration
     m1.save_model(str(STAGE1_PATH), num_iteration=rounds)
     print(f"stage 1: {rounds} rounds ({time.time() - t0:.0f}s)", flush=True)
-    val = val.with_columns(pl.Series("p1", m1.predict(val.select(feats1).to_numpy(np.float32))))
+    val = val.with_columns(pl.Series("p1", m1.predict(val.select(pl.col(feats1).cast(pl.Float32)).to_numpy())))
 
     # out-of-fold stage-1 probabilities for training entities
     oof = np.zeros(train.height)
@@ -113,7 +113,7 @@ def main(use_rev: bool):
 
     train, val = stage2_features(train), stage2_features(val)
     feats2 = feats1 + STAGE2_EXTRA
-    X2 = train.select(feats2).to_numpy(np.float32)
+    X2 = train.select(pl.col(feats2).cast(pl.Float32)).to_numpy()
     m2 = fit(X2[~stop], y[~stop], feats2, es=(X2[stop], y[stop]))
     m2.save_model(str(STAGE2_PATH), num_iteration=m2.best_iteration)
     print(f"stage 2: {m2.best_iteration} rounds ({time.time() - t0:.0f}s)", flush=True)
@@ -125,7 +125,7 @@ def main(use_rev: bool):
     evaluate_rules(val.select("s1_id", "cand_id", pl.col("p1").alias("p")), truth, ids)
     print("\n===== stage 2 =====")
     pred = val.select("s1_id", "cand_id").with_columns(
-        pl.Series("p", m2.predict(val.select(feats2).to_numpy(np.float32))))
+        pl.Series("p", m2.predict(val.select(pl.col(feats2).cast(pl.Float32)).to_numpy())))
     pred.write_parquet(config.WORK_DIR / "val_pred_stage2.parquet")
     decision = evaluate_rules(pred, truth, ids)
     decision.update(stacked=True, rev=use_rev)
