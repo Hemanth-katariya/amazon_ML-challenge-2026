@@ -80,6 +80,41 @@ def load_norm(split: str, source: int) -> pl.DataFrame:
         (pl.col("name_n") + " " + pl.col("addr_n")).alias("both_n"))
 
 
+def generate_to_dir(split: str, out_dir, keys=DEFAULT_KEYS, chunk: int = 200_000):
+    """Candidates for EVERY S1 entity of `split`, streamed to parquet parts in `out_dir`.
+
+    Memory stays bounded: one corpus index at a time, queries in chunks. Each part is
+    written as soon as it is computed, and parts already on disk are skipped, so an
+    interrupted run can simply be restarted.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cols = ["entity_id", "country", "both_n"]
+    s1 = load_norm(split, 1).select(cols)
+    for source in (2, 3):
+        other = load_norm(split, source).select(cols)
+        for country in sorted(s1["country"].unique().to_list()):
+            q_all = s1.filter(pl.col("country") == country)
+            c = other.filter(pl.col("country") == country)
+            for key in keys:
+                parts = [out_dir / f"s{source}_{country}_{key.name}_{i:04d}.parquet"
+                         for i in range(0, q_all.height, chunk)]
+                if all(p.exists() for p in parts):
+                    continue
+                t0 = time.time()
+                index = Index(c, key)
+                print(f"    S{source} {country:<7} {key.name} fit {time.time() - t0:.0f}s "
+                      f"({c.height:,} docs), {q_all.height:,} queries", flush=True)
+                for path, start in zip(parts, range(0, q_all.height, chunk)):
+                    if path.exists():
+                        continue
+                    t1 = time.time()
+                    (index.query(q_all.slice(start, chunk))
+                          .with_columns(pl.lit(source, pl.Int8).alias("source"))
+                          .write_parquet(path))
+                    print(f"      {path.name} {time.time() - t1:.0f}s", flush=True)
+                del index
+
+
 def generate(split: str, s1_ids=None, keys=DEFAULT_KEYS, verbose=True) -> pl.DataFrame:
     """Candidates for the S1 entities of `split` (optionally only `s1_ids`)."""
     s1 = load_norm(split, 1)

@@ -33,6 +33,12 @@ def random_split(s1: pl.DataFrame, frac: float = VAL_FRACTION):
     return set(s1["entity_id"]) - val, val
 
 
+def bucket_range(s1: pl.DataFrame, lo: float, hi: float):
+    """S1 ids whose stable bucket falls in [lo, hi). Buckets below VAL_FRACTION are
+    validation, so e.g. [0.10, 0.17) is a ~7% training sample disjoint from it."""
+    return {e for e in s1["entity_id"] if lo <= _bucket(e) < hi}
+
+
 def country_split(s1: pl.DataFrame, holdout: str):
     """Train on every other country, validate on `holdout` (e.g. 'India')."""
     val = set(s1.filter(pl.col("country") == holdout)["entity_id"])
