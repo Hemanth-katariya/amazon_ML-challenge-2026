@@ -19,7 +19,7 @@ from metric import load_ground_truth, score_report
 from reverse import REV_FEATURES, add_reverse_features
 from split import _bucket
 
-FEATURE_VERSION = 2  # bump whenever features.py changes
+FEATURE_VERSION = 3  # bump whenever features.py changes
 FEATURE_CACHE = config.WORK_DIR / f"features_dev_v{FEATURE_VERSION}.parquet"
 MODEL_PATH = config.WORK_DIR / "lgbm.txt"
 DECISION_PATH = config.WORK_DIR / "decision.json"
@@ -70,6 +70,9 @@ def evaluate_rules(pred: pl.DataFrame, truth, ids) -> dict:
 
     print("\n-- expected-F set selection --")
     print("expected_f            ", fmt(run("expected_f", decide.expected_f(pred))))
+    for t1 in np.arange(0.6, 0.96, 0.05):
+        rep = run("gated_expected_f", decide.gated_expected_f(pred, t1), t_first=round(float(t1), 2))
+        print(f"gated t_first={t1:.2f}  ", fmt(rep))
     print("one_owner + expected_f", fmt(run("owner_expected_f",
                                             decide.expected_f(decide.one_owner(pred)))))
 
@@ -108,6 +111,7 @@ def main(use_rev: bool):
     pred = val.select("s1_id", "cand_id").with_columns(
         pl.Series("p", model.predict(val.select(feats).to_numpy(),
                                      num_iteration=model.best_iteration)))
+    pred.write_parquet(config.WORK_DIR / "val_pred.parquet")  # for offline rule experiments
     truth = load_ground_truth(config.ground_truth_parquet())
     # validation entities with zero candidates still count (as empty predictions)
     ids = list(set(pl.read_parquet(cand_path("dev"), columns=["s1_id", "part"])

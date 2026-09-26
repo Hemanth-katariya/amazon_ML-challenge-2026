@@ -38,6 +38,8 @@ def apply(pred: pl.DataFrame, decision: dict) -> pl.DataFrame:
         return two_thresholds(pred, decision["t_first"], decision["t_rest"])
     if rule == "expected_f":
         return expected_f(pred)
+    if rule == "gated_expected_f":
+        return gated_expected_f(pred, decision["t_first"])
     if rule == "owner_expected_f":
         return expected_f(one_owner(pred))
     raise ValueError(f"unknown decision rule {rule!r}")
@@ -49,7 +51,14 @@ def one_owner(pred: pl.DataFrame) -> pl.DataFrame:
     return pred.filter(pl.col("p") == pl.col("p").max().over("cand_id"))
 
 
-def expected_f(pred: pl.DataFrame, min_p: float = 0.0) -> pl.DataFrame:
+def gated_expected_f(pred: pl.DataFrame, t_first: float) -> pl.DataFrame:
+    """Strict gate for "does this entity have any match" (best p >= t_first; singletons
+    need it), then expected-F0.5 picks how many candidates to keep (always >= 1)."""
+    gated = pred.filter(pl.col("p").max().over("s1_id") >= t_first)
+    return expected_f(gated, allow_empty=False)
+
+
+def expected_f(pred: pl.DataFrame, min_p: float = 0.0, allow_empty: bool = True) -> pl.DataFrame:
     """Per S1, keep the probability-sorted prefix that maximizes plug-in expected F0.5:
     F = 1.25*tp / (1.25*tp + 0.25*fn + fp) with tp = sum of kept p, fn = sum of dropped p,
     fp = kept - tp. The empty set is chosen when P(no match) = prod(1-p) beats it."""
@@ -67,6 +76,8 @@ def expected_f(pred: pl.DataFrame, min_p: float = 0.0) -> pl.DataFrame:
     best = (df.group_by("s1_id").agg(pl.col("F").max().alias("F_best"),
                                      pl.col("k").get(pl.col("F").arg_max()).alias("k_best"))
               .join(p_empty, on="s1_id"))
-    keep = best.filter(pl.col("F_best") > pl.col("F_empty")).select("s1_id", "k_best")
+    if allow_empty:
+        best = best.filter(pl.col("F_best") > pl.col("F_empty"))
+    keep = best.select("s1_id", "k_best")
     return (df.join(keep, on="s1_id").filter(pl.col("k") <= pl.col("k_best"))
               .select("s1_id", "cand_id"))

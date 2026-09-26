@@ -31,6 +31,9 @@ FEATURES = [
     # decoy discrimination (siblings: near-identical name / same street, other number)
     "c_missing_frac", "c_extra_n", "num_a_in_b", "num_conflict", "num_trunc",
     "num_absdiff_log", "a_alpha_jacc", "cand_name_freq", "unique_exact",
+    # group agreement: a real entity's 3-4 copies back each other up, a pure decoy
+    # usually stands alone (val: 21% of true matches vs 69% of decoys lack support)
+    "sup_num", "sup_core", "num_is_mode", "core_is_mode",
 ]
 
 
@@ -179,13 +182,28 @@ def pair_features(df: pl.DataFrame) -> pl.DataFrame:
         pl.col("cand_name_freq").fill_null(0).log1p().alias("cand_name_freq"),
     )
     # context within the S1 entity's candidate list
-    return out.with_columns(
+    out = out.with_columns(
         (pl.col("score") / pl.col("score").max().over("s1_id")).alias("score_rel"),
         (pl.col("score").max().over("s1_id") - pl.col("score")).alias("score_gap"),
         (pl.col("n_tset").max().over("s1_id") - pl.col("n_tset")).alias("n_tset_gap"),
         (pl.col("a_tset").max().over("s1_id") - pl.col("a_tset")).alias("a_tset_gap"),
         (pl.col("c_ratio").max().over("s1_id") - pl.col("c_ratio")).alias("c_ratio_gap"),
+        pl.col("addr_n_b").str.extract_all(r"\d+").list.unique().list.sort().list.join(" ")
+          .alias("_nums"),
     )
+    # group agreement among the S1 entity's candidates
+    out = out.with_columns(
+        pl.len().over("s1_id", "_nums").alias("_n_nums"),
+        pl.len().over("s1_id", "core_n_b").alias("_n_core"),
+    ).with_columns(
+        pl.when(pl.col("_nums") != "").then(pl.col("_n_nums") - 1).otherwise(0).alias("sup_num"),
+        (pl.col("_n_core") - 1).alias("sup_core"),
+        ((pl.col("_nums") != "")
+         & (pl.col("_n_nums") == pl.col("_n_nums").filter(pl.col("_nums") != "").max().over("s1_id")))
+        .cast(pl.Int8).alias("num_is_mode"),
+        (pl.col("_n_core") == pl.col("_n_core").max().over("s1_id")).cast(pl.Int8).alias("core_is_mode"),
+    )
+    return out.drop("_nums", "_n_nums", "_n_core")
 
 
 def iter_chunks(cands: pl.DataFrame, chunk_s1: int = 50_000):
