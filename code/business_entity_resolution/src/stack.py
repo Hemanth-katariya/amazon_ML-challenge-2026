@@ -20,12 +20,14 @@ import numpy as np
 import polars as pl
 
 import config
-from features import FEATURES
+from features import FEATURES, build
 from make_candidates import cand_path
 from metric import load_ground_truth
 from reverse import REV_FEATURES, add_reverse_features
 from split import _bucket
-from train_matcher import FEATURE_CACHE, PARAMS, evaluate_rules
+from train_matcher import FEATURE_CACHE, FEATURE_VERSION, PARAMS, evaluate_rules
+
+EXTRA_CACHE = config.WORK_DIR / f"features_extra_v{FEATURE_VERSION}.parquet"
 
 K_FOLDS = 3
 STAGE2_EXTRA = ["p1", "p1_rank", "p1_gap", "p1_n_above", "p1_sum",
@@ -36,8 +38,9 @@ STAGE2_PATH = config.WORK_DIR / "lgbm_stage2.txt"
 
 def stage2_features(df: pl.DataFrame) -> pl.DataFrame:
     """Summaries of stage-1 probabilities within each S1 entity's candidate list.
-    Needs columns: s1_id, source, p1, nums_key, core_key (whole S1 groups)."""
-    df = df.with_columns(
+    Needs columns: s1_id, source, p1, nums_key, core_key (whole S1 groups).
+    Row order is preserved (callers align labels / matrices by position)."""
+    df = df.with_row_index("_i").with_columns(
         pl.col("p1").rank("ordinal", descending=True).over("s1_id").alias("p1_rank"),
         (pl.col("p1").max().over("s1_id") - pl.col("p1")).alias("p1_gap"),
         (pl.col("p1") > 0.5).sum().over("s1_id").alias("p1_n_above"),
@@ -59,19 +62,22 @@ def stage2_features(df: pl.DataFrame) -> pl.DataFrame:
         pl.when(pl.col("p1") >= pl.col("_t").list.first())
           .then(pl.col("_t").list.get(1, null_on_oob=True))
           .otherwise(pl.col("_t").list.first()).fill_null(0.0).alias("p1_same_src_max_other"))
-    return df.drop("_t")
+    return df.sort("_i").drop("_t", "_i")
 
 
 def group_keys(split: str, df: pl.DataFrame) -> pl.DataFrame:
     """Attach nums_key (sorted house-number set of the candidate) and core_key."""
-    from blocking import load_norm
-    txt = pl.concat([load_norm(split, s).select("entity_id", "core_n", "addr_n") for s in (2, 3)])
-    txt = txt.filter(pl.col("entity_id").is_in(df["cand_id"].unique().implode())).select(
+    from normalize_all import norm_path
+    wanted = df["cand_id"].unique().implode()
+    txt = pl.concat([
+        pl.scan_parquet(norm_path(split, s)).select("entity_id", "core_n", "addr_n")
+          .filter(pl.col("entity_id").is_in(wanted)).collect()
+        for s in (2, 3)]).select(
         pl.col("entity_id").alias("cand_id"),
         pl.col("core_n").alias("core_key"),
         pl.col("addr_n").str.extract_all(r"\d+").list.unique().list.sort().list.join(" ")
           .alias("nums_key"))
-    return df.join(txt, on="cand_id", how="left")
+    return df.join(txt, on="cand_id", how="left", maintain_order="left")
 
 
 def fit(X, y, feats, rounds=None, es=None):
@@ -82,26 +88,49 @@ def fit(X, y, feats, rounds=None, es=None):
     return lgb.train(PARAMS, lgb.Dataset(X, y, feature_name=feats), **kw)
 
 
-def main(use_rev: bool):
-    t0 = time.time()
+def load_dev(extra: bool) -> pl.DataFrame:
+    """Dev features (float32 to halve memory), optionally plus the extra train sample."""
     df = pl.read_parquet(FEATURE_CACHE)
+    if extra:
+        if not EXTRA_CACHE.exists():
+            t0 = time.time()
+            f = build(pl.read_parquet(cand_path("extra")), "train")
+            f.select(df.columns).write_parquet(EXTRA_CACHE)
+            print(f"extra features: {f.height:,} rows in {time.time() - t0:.0f}s", flush=True)
+            del f
+        df = pl.concat([df, pl.read_parquet(EXTRA_CACHE)], how="vertical_relaxed")
+    return df.with_columns(pl.col(FEATURES).cast(pl.Float32))
+
+
+def main(use_rev: bool, extra: bool):
+    t0 = time.time()
+    df = load_dev(extra)
     feats1 = list(FEATURES)
     if use_rev:
         df = add_reverse_features(df, "train")
         feats1 += REV_FEATURES
     df = group_keys("train", df)
-    train = df.filter(pl.col("part") == "train")
-    val = df.filter(pl.col("part") == "val")
-    fold = np.array([int(_bucket(e) * 1000) % K_FOLDS for e in train["s1_id"]])
-    stop = np.array([_bucket(e) >= 0.16 for e in train["s1_id"]])
-    X, y = train.select(pl.col(feats1).cast(pl.Float32)).to_numpy(), train["label"].to_numpy()
+    # one float32 matrix, then keep only a slim id/key frame (memory)
+    is_train = (df["part"] == "train").to_numpy()
+    X_all = df.select(pl.col(feats1).cast(pl.Float32)).to_numpy()
+    meta = df.select("s1_id", "cand_id", "source", "label", "nums_key", "core_key")
+    del df
+    train, val = meta.filter(pl.Series(is_train)), meta.filter(pl.Series(~is_train))
+    X, Xv = X_all[is_train], X_all[~is_train]
+    del X_all, meta
+    buckets = np.array([_bucket(e) for e in train["s1_id"]])
+    fold = (buckets * 1000).astype(int) % K_FOLDS
+    stop = (buckets >= 0.16) & (buckets < 0.17)  # early-stopping slice of training entities
+    y = train["label"].to_numpy()
+    print(f"train entities={train['s1_id'].n_unique():,} rows={train.height:,} "
+          f"(early-stop rows={int(stop.sum()):,})", flush=True)
 
     # stage 1 on all training entities -> used for validation (and test)
     m1 = fit(X[~stop], y[~stop], feats1, es=(X[stop], y[stop]))
     rounds = m1.best_iteration
     m1.save_model(str(STAGE1_PATH), num_iteration=rounds)
     print(f"stage 1: {rounds} rounds ({time.time() - t0:.0f}s)", flush=True)
-    val = val.with_columns(pl.Series("p1", m1.predict(val.select(pl.col(feats1).cast(pl.Float32)).to_numpy())))
+    val = val.with_columns(pl.Series("p1", m1.predict(Xv)))
 
     # out-of-fold stage-1 probabilities for training entities
     oof = np.zeros(train.height)
@@ -111,9 +140,12 @@ def main(use_rev: bool):
         print(f"  fold {k} done ({time.time() - t0:.0f}s)", flush=True)
     train = train.with_columns(pl.Series("p1", oof))
 
+    # stage-2 matrices = stage-1 features + group summaries (row order preserved)
     train, val = stage2_features(train), stage2_features(val)
     feats2 = feats1 + STAGE2_EXTRA
-    X2 = train.select(pl.col(feats2).cast(pl.Float32)).to_numpy()
+    X2 = np.hstack([X, train.select(pl.col(STAGE2_EXTRA).cast(pl.Float32)).to_numpy()])
+    Xv2 = np.hstack([Xv, val.select(pl.col(STAGE2_EXTRA).cast(pl.Float32)).to_numpy()])
+    del X, Xv
     m2 = fit(X2[~stop], y[~stop], feats2, es=(X2[stop], y[stop]))
     m2.save_model(str(STAGE2_PATH), num_iteration=m2.best_iteration)
     print(f"stage 2: {m2.best_iteration} rounds ({time.time() - t0:.0f}s)", flush=True)
@@ -124,8 +156,7 @@ def main(use_rev: bool):
     print("\n===== stage 1 alone =====")
     evaluate_rules(val.select("s1_id", "cand_id", pl.col("p1").alias("p")), truth, ids)
     print("\n===== stage 2 =====")
-    pred = val.select("s1_id", "cand_id").with_columns(
-        pl.Series("p", m2.predict(val.select(pl.col(feats2).cast(pl.Float32)).to_numpy())))
+    pred = val.select("s1_id", "cand_id").with_columns(pl.Series("p", m2.predict(Xv2)))
     pred.write_parquet(config.WORK_DIR / "val_pred_stage2.parquet")
     decision = evaluate_rules(pred, truth, ids)
     decision.update(stacked=True, rev=use_rev)
@@ -136,4 +167,4 @@ def main(use_rev: bool):
 
 
 if __name__ == "__main__":
-    main("--rev" in sys.argv)
+    main("--rev" in sys.argv, "--extra" in sys.argv)

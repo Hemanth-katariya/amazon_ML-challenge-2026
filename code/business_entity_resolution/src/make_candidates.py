@@ -1,6 +1,7 @@
 """Generate blocking candidates and save them, labelled when ground truth exists.
 
   python make_candidates.py dev   -> train sample + validation slice (labelled)
+  python make_candidates.py extra -> a second, disjoint train sample (needs full_train)
   python make_candidates.py test  -> every test S1 entity
 """
 import sys
@@ -13,6 +14,7 @@ from blocking import generate
 from split import VAL_FRACTION, bucket_range, s1_frame
 
 TRAIN_SAMPLE = (VAL_FRACTION, VAL_FRACTION + 0.07)  # ~154k training entities
+EXTRA_SAMPLE = (VAL_FRACTION + 0.07, VAL_FRACTION + 0.14)  # another ~155k, disjoint
 VAL_SLICE = (0.0, 0.025)                             # ~55k of the validation entities
 
 
@@ -41,6 +43,14 @@ def main(which: str):
         cands = generate("train", train_ids | val_ids)
         part = pl.when(pl.col("s1_id").is_in(list(val_ids))).then(pl.lit("val")).otherwise(pl.lit("train"))
         cands = label(cands).with_columns(part.alias("part"))
+    elif which == "extra":
+        # more training entities, taken from the full-density blocking output
+        from reverse import full_dir
+        ids = bucket_range(s1_frame("train"), *EXTRA_SAMPLE)
+        print(f"extra training sample={len(ids):,}")
+        cands = (pl.scan_parquet(str(full_dir("train") / "*.parquet"))
+                   .filter(pl.col("s1_id").is_in(list(ids))).collect())
+        cands = label(cands).with_columns(pl.lit("train").alias("part"))
     elif which == "test":
         cands = generate("test")
     else:

@@ -38,7 +38,8 @@ def _predict(model: lgb.Booster, df: pl.DataFrame):
 
 
 class Scorer:
-    def __init__(self):
+    def __init__(self, split: str = "test"):
+        self.split = split  # whose reverse statistics to use
         if STAGE2_PATH.exists():
             self.m1 = lgb.Booster(model_file=str(STAGE1_PATH))
             self.m2 = lgb.Booster(model_file=str(STAGE2_PATH))
@@ -52,7 +53,7 @@ class Scorer:
     def __call__(self, f: pl.DataFrame) -> pl.DataFrame:
         """f = pair features for whole S1 groups -> frame(s1_id, cand_id, p)."""
         if self.use_rev:
-            f = add_reverse_features(f, "test")
+            f = add_reverse_features(f, self.split)
         p1 = _predict(self.m1, f)
         if self.m2 is None:
             return f.select("s1_id", "cand_id").with_columns(pl.Series("p", p1))
