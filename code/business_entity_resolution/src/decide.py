@@ -18,6 +18,31 @@ def by_threshold(pred: pl.DataFrame, t: float) -> pl.DataFrame:
     return pred.filter(pl.col("p") >= t).select("s1_id", "cand_id")
 
 
+def two_thresholds(pred: pl.DataFrame, t_first: float, t_rest: float) -> pl.DataFrame:
+    """Keep an entity's best candidate if p >= t_first (the "has any match" decision,
+    which singletons need to be strict); then keep further candidates with p >= t_rest."""
+    ranked = pred.with_columns(
+        pl.col("p").max().over("s1_id").alias("p_top"),
+        pl.col("p").rank("ordinal", descending=True).over("s1_id").alias("r"))
+    return (ranked.filter(pl.col("p_top") >= t_first)
+                  .filter((pl.col("r") == 1) | (pl.col("p") >= t_rest))
+                  .select("s1_id", "cand_id"))
+
+
+def apply(pred: pl.DataFrame, decision: dict) -> pl.DataFrame:
+    """Apply the rule chosen on validation (decision.json) -> rows(s1_id, cand_id)."""
+    rule = decision["rule"]
+    if rule == "threshold":
+        return by_threshold(pred, decision["t"])
+    if rule == "two":
+        return two_thresholds(pred, decision["t_first"], decision["t_rest"])
+    if rule == "expected_f":
+        return expected_f(pred)
+    if rule == "owner_expected_f":
+        return expected_f(one_owner(pred))
+    raise ValueError(f"unknown decision rule {rule!r}")
+
+
 def one_owner(pred: pl.DataFrame) -> pl.DataFrame:
     """Each S2/S3 record belongs to at most one S1 entity (holds in 100% of ground truth):
     keep only the pair with the highest probability for every candidate record."""

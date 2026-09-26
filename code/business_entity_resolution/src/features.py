@@ -47,31 +47,35 @@ def rarity_tables(split: str):
     return name, addr, cand
 
 
-def attach_text(cands: pl.DataFrame, split: str) -> pl.DataFrame:
+class Tables:
+    """Lookup tables for one split, loaded once and reused for every chunk."""
+
+    def __init__(self, split: str):
+        cols = ["entity_id", "country", "name_n", "core_n", "addr_n"]
+        self.s1 = (load_norm(split, 1).select(cols)
+                     .rename({c: f"{c}_a" for c in cols[2:]}).rename({"entity_id": "s1_id"}))
+        other = pl.concat([load_norm(split, s).select(cols[0], *cols[2:]) for s in (2, 3)])
+        indic = pl.concat([
+            pl.read_parquet(config.parquet_path(split, s), columns=["entity_id", "business_name"])
+              .select("entity_id", pl.col("business_name").str.contains(INDIC_PATTERN)
+                      .cast(pl.Int8).alias("b_indic"))
+            for s in (2, 3)])
+        self.other = (other.join(indic, on="entity_id")
+                           .rename({c: f"{c}_b" for c in cols[2:]}).rename({"entity_id": "cand_id"}))
+        name_freq, addr_freq, cand_freq = rarity_tables(split)
+        self.name_freq = name_freq.rename({"core_n": "core_n_a"})
+        self.addr_freq = addr_freq.rename({"addr_n": "addr_n_a"})
+        self.cand_freq = cand_freq.rename({"core_n": "core_n_b"})
+
+
+def attach_text(cands: pl.DataFrame, tables: Tables) -> pl.DataFrame:
     """Join normalized S1 and candidate text plus rarity counts onto candidate rows."""
-    cols = ["entity_id", "country", "name_n", "core_n", "addr_n"]
-    s1 = load_norm(split, 1).select(cols).filter(
-        pl.col("entity_id").is_in(cands["s1_id"].unique().implode()))
-    wanted = cands["cand_id"].unique().implode()
-    other = pl.concat([
-        load_norm(split, s).select(cols[0], *cols[2:]).filter(pl.col("entity_id").is_in(wanted))
-        for s in (2, 3)])
-    indic = pl.concat([
-        pl.read_parquet(config.parquet_path(split, s), columns=["entity_id", "business_name"])
-          .filter(pl.col("entity_id").is_in(wanted))
-          .select("entity_id", pl.col("business_name").str.contains(INDIC_PATTERN)
-                  .cast(pl.Int8).alias("b_indic"))
-        for s in (2, 3)])
-    name_freq, addr_freq, cand_freq = rarity_tables(split)
     return (cands
-            .join(s1.rename({c: f"{c}_a" for c in cols[2:]}).rename({"entity_id": "s1_id"}),
-                  on="s1_id")
-            .join(other.rename({c: f"{c}_b" for c in cols[2:]}).rename({"entity_id": "cand_id"}),
-                  on="cand_id")
-            .join(indic.rename({"entity_id": "cand_id"}), on="cand_id")
-            .join(name_freq.rename({"core_n": "core_n_a"}), on=["country", "core_n_a"], how="left")
-            .join(addr_freq.rename({"addr_n": "addr_n_a"}), on=["country", "addr_n_a"], how="left")
-            .join(cand_freq.rename({"core_n": "core_n_b"}), on=["country", "core_n_b"], how="left"))
+            .join(tables.s1, on="s1_id")
+            .join(tables.other, on="cand_id")
+            .join(tables.name_freq, on=["country", "core_n_a"], how="left")
+            .join(tables.addr_freq, on=["country", "addr_n_a"], how="left")
+            .join(tables.cand_freq, on=["country", "core_n_b"], how="left"))
 
 
 # ---------------------------------------------------------------- features
@@ -184,12 +188,14 @@ def pair_features(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def build(cands: pl.DataFrame, split: str, chunk_s1: int = 50_000) -> pl.DataFrame:
-    """Features for all candidates, processed in chunks of whole S1 groups."""
-    df = attach_text(cands, split)
-    ids = df["s1_id"].unique().sort()
-    parts = []
+def iter_chunks(cands: pl.DataFrame, chunk_s1: int = 50_000):
+    """Yield candidate frames holding whole S1 groups (context features need them)."""
+    ids = cands["s1_id"].unique().sort()
     for i in range(0, len(ids), chunk_s1):
-        chunk = df.filter(pl.col("s1_id").is_in(ids[i:i + chunk_s1].implode()))
-        parts.append(pair_features(chunk))
-    return pl.concat(parts)
+        yield cands.filter(pl.col("s1_id").is_in(ids[i:i + chunk_s1].implode()))
+
+
+def build(cands: pl.DataFrame, split: str, chunk_s1: int = 50_000, tables: Tables = None):
+    """Features for all candidates, processed in chunks of whole S1 groups."""
+    tables = tables or Tables(split)
+    return pl.concat([pair_features(attach_text(c, tables)) for c in iter_chunks(cands, chunk_s1)])
