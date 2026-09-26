@@ -1,0 +1,14 @@
+# Data - never commit, it's huge and comes from the organizers
+data/
+code/business_entity_resolution/output/*.tsv
+scratch/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
