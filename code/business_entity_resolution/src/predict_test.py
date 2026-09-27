@@ -57,31 +57,52 @@ class Scorer:
         p1 = _predict(self.m1, f)
         if self.m2 is None:
             return f.select("s1_id", "cand_id").with_columns(pl.Series("p", p1))
-        f = f.with_columns(
-            pl.Series("p1", p1),
-            pl.col("core_n_b").alias("core_key"),
-            pl.col("addr_n_b").str.extract_all(r"\d+").list.unique().list.sort().list.join(" ")
-              .alias("nums_key"))
+        f = f.with_columns(pl.Series("p1", p1))
+        if "nums_key" not in f.columns:  # raw pair features (cached test features have keys)
+            f = f.with_columns(
+                pl.col("core_n_b").alias("core_key"),
+                pl.col("addr_n_b").str.extract_all(r"\d+").list.unique().list.sort()
+                  .list.join(" ").alias("nums_key"))
         f = stage2_features(f)
         return f.select("s1_id", "cand_id").with_columns(pl.Series("p", _predict(self.m2, f)))
 
 
-def main(cand_dir=None, out_dir=None):
-    t0 = time.time()
-    cand_dir = cand_dir or full_dir("test")
-    out_dir = out_dir or config.OUTPUT_DIR
-    cands = pl.read_parquet(str(cand_dir / "*.parquet"))
-    scorer = Scorer()
-    print(f"candidates: {cands.height:,} rows, {cands['s1_id'].n_unique():,} S1; "
-          f"two-stage={scorer.m2 is not None} reverse={scorer.use_rev} "
-          f"decision={scorer.decision}", flush=True)
-
-    tables = Tables("test")
+def score_cached(scorer: "Scorer") -> pl.DataFrame:
+    """Score the cached test features (test_features.py), one part at a time."""
+    from test_features import FEATS_DIR
+    parts = sorted(FEATS_DIR.glob("*.parquet"))
     preds = []
-    for i, chunk in enumerate(iter_chunks(cands, 100_000)):
-        preds.append(scorer(pair_features(attach_text(chunk, tables))))
-        print(f"  chunk {i}: {chunk.height:,} rows ({time.time() - t0:.0f}s)", flush=True)
-    pred = pl.concat(preds)
+    for i, p in enumerate(parts):
+        preds.append(scorer(pl.read_parquet(p)))
+        if i % 20 == 0:
+            print(f"  scored {i + 1}/{len(parts)} parts", flush=True)
+    return pl.concat(preds)
+
+
+def score_raw(scorer: "Scorer", cands: pl.DataFrame) -> pl.DataFrame:
+    """Compute features on the fly (small candidate sets, e.g. a dry run)."""
+    tables = Tables("test")
+    return pl.concat([scorer(pair_features(attach_text(c, tables)))
+                      for c in iter_chunks(cands, 100_000)])
+
+
+def main(cand_dir=None, out_dir=None):
+    """Default: score cached test features. With cand_dir: compute features on the fly."""
+    t0 = time.time()
+    out_dir = out_dir or config.OUTPUT_DIR
+    scorer = Scorer()
+    print(f"two-stage={scorer.m2 is not None} reverse={scorer.use_rev} "
+          f"decision={scorer.decision}", flush=True)
+    if cand_dir is None:
+        cands = pl.read_parquet(str(full_dir("test") / "*.parquet"), columns=["s1_id", "cand_id"])
+        pred = score_cached(scorer)
+    else:
+        cands = pl.read_parquet(str(cand_dir / "*.parquet"))
+        pred = score_raw(scorer, cands)
+    print(f"candidates: {cands.height:,} rows; scored {pred.height:,} "
+          f"({time.time() - t0:.0f}s)", flush=True)
+    if pred.height != cands.height:
+        raise SystemExit("scored rows != candidate rows: test features are incomplete")
     pred.write_parquet(PRED_PATH)
 
     matches = decide.apply(pred, scorer.decision)

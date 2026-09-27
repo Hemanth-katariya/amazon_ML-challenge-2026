@@ -49,7 +49,7 @@ def add_reverse_features(pairs: pl.DataFrame, split: str) -> pl.DataFrame:
     """pairs needs source, cand_id, score. Adds REV_FEATURES."""
     stats = reverse_stats(split)
     out = (pairs.with_columns(cand_key(pl.col("source"), pl.col("cand_id")).alias("ck"))
-                .join(stats, on="ck", how="left"))
+                .join(stats, on="ck", how="left", maintain_order="left"))
     is_best = pl.col("score") >= pl.col("rev_best") - 1e-6
     return out.with_columns(
         is_best.cast(pl.Int8).alias("rev_is_best"),
