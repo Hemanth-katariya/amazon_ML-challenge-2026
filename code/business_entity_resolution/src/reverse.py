@@ -27,7 +27,8 @@ def cand_key(source: pl.Expr, cand_id: pl.Expr) -> pl.Expr:
 def reverse_stats(split: str) -> pl.DataFrame:
     """Per candidate record: rev_n, rev_best, rev_second, rev_n_close (cached)."""
     path = config.WORK_DIR / f"reverse_{split}.parquet"
-    if path.exists():
+    newest_part = max(p.stat().st_mtime for p in full_dir(split).glob("*.parquet"))
+    if path.exists() and path.stat().st_mtime > newest_part:  # stale if blocking wrote later
         return pl.read_parquet(path)
     lf = (pl.scan_parquet(str(full_dir(split) / "*.parquet"))
             .select(cand_key(pl.col("source"), pl.col("cand_id")).alias("ck"), "score"))

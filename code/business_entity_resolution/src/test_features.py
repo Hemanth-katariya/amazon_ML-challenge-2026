@@ -19,7 +19,7 @@ from features import FEATURES, Tables, attach_text, iter_chunks, pair_features
 from reverse import full_dir
 
 FEATS_DIR = config.WORK_DIR / "test_feats"
-KEEP = ["s1_id", "cand_id", "source", *FEATURES, "core_key", "nums_key"]
+KEEP = ["s1_id", "cand_id", *FEATURES, "core_key", "nums_key"]  # FEATURES has source
 
 
 def part_groups(cand_dir):
