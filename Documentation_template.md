@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-We resolve each Source-1 business to its Source-2/3 records with a four-step pipeline: script-aware text normalization, TF-IDF blocking over **name and address combined**, a two-stage LightGBM pair classifier, and a per-entity decision rule tuned directly for macro F0.5. The key ideas are a transliteration dictionary **learned from the training pairs** (Indian-script names), **reverse features** from blocking every Source-1 entity (does another Source-1 entity claim this record more strongly?), and a second stage that reads the first stage's probabilities for the entity's other candidates. Validation macro F0.5: **0.9792** (blocking ceiling 0.9935).
+We resolve each Source-1 business to its Source-2/3 records with a four-step pipeline: script-aware text normalization, TF-IDF blocking over **name and address combined**, a two-stage LightGBM pair classifier, and a per-entity decision rule tuned directly for macro F0.5. The key ideas are a transliteration dictionary **learned from the training pairs** (Indian-script names), **reverse features** from blocking every Source-1 entity (does another Source-1 entity claim this record more strongly?), a second stage that reads the first stage's probabilities for the entity's other candidates, and **decoy-branch augmentation**: the test set carries twice the decoy records of the training set, grouped into mutually supporting "branches", so we simulate that density in training and select the decision rule on a test-like validation set. Validation macro F0.5: **0.9786** on the plain validation slice and **0.9803** on the test-like one (blocking ceiling 0.9935).
 
 ---
 
@@ -30,6 +30,7 @@ Measured on the training data before modelling:
 | Address scripts | only 17 distinct Indic tokens occur in addresses, all state names | addresses stay Latin: the cross-script anchor |
 | Missing address | 3.4% of S2/S3 records | name-only records must still be handled |
 | France | 15% of test S1 (259k), absent from training | no country-specific features or rules learned from US/India |
+| Record density | train 4.67 S2+S3 records per S1 entity; test 5.53-5.82 (every country) | ~2.3 unmatched decoys per test entity vs 1.2 in train: the test is harder than any random validation split |
 
 Noise observed in matched pairs: typos, spurious accents, word reordering, legal-suffix flips (`LLC Orellana …`), appended generic words (`… Center`, `… Services`), bracket junk (`[[LLC]]`), literal `null` / `<NULL>`, phone numbers inside names, digit-for-letter substitutions (`0xford`, `6ulf`), padded or truncated house numbers (`0112`/`112`, `16076`/`1607`), and domain names used as names.
 
@@ -38,7 +39,7 @@ The unlabelled Source-2/3 records include **deliberate decoys**: records for a d
 ### 2.2 Solution Strategy
 
 **Approach Type:** Blocking + two-stage gradient-boosted classifier + F0.5-optimal set selection.
-**Core Innovation:** (1) transliteration learned from training pairs; (2) blocking on name and address as one document; (3) reverse features from full-density blocking; (4) stage-2 group features over stage-1 probabilities.
+**Core Innovation:** (1) transliteration learned from training pairs; (2) blocking on name and address as one document; (3) reverse features from full-density blocking; (4) stage-2 group features over stage-1 probabilities; (5) decoy-branch augmentation that makes training and model selection match the test set's decoy density.
 
 ---
 
@@ -69,7 +70,9 @@ Why a combined document: a name-only index drowns in namesakes and an address-on
 
 **Model type:** LightGBM binary classifiers (learning rate 0.05, 255 leaves). Stage 1 uses pair features plus reverse features. Stage 2 adds the group summaries of stage-1 probabilities; on training entities these come from 3-fold out-of-fold models, so stage 2 is trained on the same kind of probabilities it sees at test time.
 
-**Threshold selection method:** chosen on validation among a fixed threshold, two thresholds, plug-in expected-F0.5 set selection, and a *gated* variant. The gated rule won: an entity gets any match only if its best candidate clears a strict threshold (0.65), which protects singletons; the number of matches is then the prefix of probability-sorted candidates that maximizes expected F0.5.
+**Decoy-branch augmentation** (`augment.py`). Our first leaderboard submission scored 0.95 against 0.979 on validation. Measuring the test files explained it: they hold ~2.3 unmatched decoys per Source-1 entity against 1.2 in training, and the extra decoys arrive as *branches*: two or three records at a near-miss address that back each other up (for Source-1 `Rorie White Preferred Beverage, 10154 Rocky Point Rd`, the test holds `…Corp.`, `…uptown` and `…Midtown`, all at **10167**). The group features learned on training, where a decoy usually stands alone, voted for such branches. We reproduce the shift from training data alone: every pure decoy candidate (label 0, owned by no Source-1 entity) is cloned into the other source with identical pair features, and the group features are recomputed. Cloning half of them on the validation slice reproduces the leaderboard behaviour of the unaugmented model (3.463 matches kept per entity vs 3.456 on test; F0.5 0.9504 vs 0.95 on the leaderboard). The final model is trained with the same augmentation (rate 0.5), and the decision rule is selected on this test-like validation copy.
+
+**Threshold selection method:** chosen on the test-like validation copy among a fixed threshold, two thresholds, plug-in expected-F0.5 set selection, and a *gated* variant. The gated rule won: an entity gets any match only if its best candidate clears a strict threshold (0.60), which protects singletons; the number of matches is then the prefix of probability-sorted candidates that maximizes expected F0.5.
 
 ---
 
@@ -84,12 +87,21 @@ Validation: 54,944 held-out S1 entities (entities, not pairs, are held out; bloc
 | + decoy features (missing words, house-number conflict/truncation, rarity) | 0.9739 |
 | + group agreement, gated rule | 0.9755 |
 | + stage 2 | 0.9775 |
-| + reverse features | **0.9792** |
+| + reverse features | 0.9792 |
 | Blocking ceiling (perfect matcher) | 0.9935 |
 
-- **F_0.5 Score (macro):** 0.9792 on validation.
+Plain validation hides the test's decoy density, so the last step is measured on both copies:
+
+| Model | Plain validation | Test-like validation | Leaderboard |
+|---|---|---|---|
+| Two-stage + reverse features | 0.9792 | 0.9504 | 0.95 |
+| + decoy-branch augmentation (final) | 0.9786 | **0.9803** | (submitted) |
+
+- **F_0.5 Score (macro):** 0.9786 on plain validation, 0.9803 on the test-like validation copy.
 - **Common false positives (wrong merges):** sibling decoys: the same street with an adjacent or truncated house number, or a near-identical name differing by one word. Reverse features halved them (1,577 → 764 pairs).
 - **Common false negatives (missed matches):** records without an address whose name is shared by several S1 entities. 48% of the remaining misses are of this kind; with no address and a namesake, nothing in the record identifies the owner, and under F0.5 guessing costs more than it gains.
+
+**Measured but not shipped: a second blocking pass.** Two cheap extra keys, words cut to their first four letters (`specilists`→`spec`, `1500d`→`1500`) and the Source-1 name searched against records with no address, raise validation pair recall from 98.0% to 99.0% and the blocking ceiling from 0.9935 to 0.9969 (64 instead of 40 candidates per entity). The full test run needs ~7 hours on our laptop and did not fit before the deadline; the code is on the `union-blocking-wip` branch of our repository.
 
 France cannot be scored without labels. As a check, on 2,100 test entities France received matches at the same rate as the training countries (5.3% predicted empty vs 4.4-5.4% for US and India; 3.30 matches per entity vs 3.22-3.29).
 
@@ -97,7 +109,7 @@ France cannot be scored without labels. As a check, on 2,100 test entities Franc
 
 ## 6. Conclusion
 
-Measuring the data first shaped every decision: addresses rather than names identify businesses, transliteration can be learned from the training pairs themselves, and the hardest errors are decoys that only other Source-1 entities or the entity's other copies can expose. Blocking reaches a 0.9935 ceiling and the matcher reaches 0.9792 on validation; most of the remaining gap is name-only records with namesakes, which no feature in the record can resolve.
+Measuring the data first shaped every decision: addresses rather than names identify businesses, transliteration can be learned from the training pairs themselves, and the hardest errors are decoys that only other Source-1 entities or the entity's other copies can expose. The largest single lesson came from the leaderboard: a random validation split looked 0.03 better than the test because the test carries twice the decoys, in branches. Measuring that shift and simulating it in training fixed the gap on our test-like validation (0.9504 → 0.9803). Most of the remaining loss is records without an address whose name is shared by several entities, and true matches the first blocking key misses, which a second key recovers.
 
 ---
 
@@ -105,10 +117,10 @@ Measuring the data first shaped every decision: addresses rather than names iden
 
 ### A. Code Artefacts
 
-`code/business_entity_resolution/` contains the full pipeline (`src/`), `README.md` with step-by-step reproduction and timings, and `requirements.txt` with pinned versions. Entry points, in order: `convert_to_parquet.py`, `normalize.py`, `normalize_all.py`, `make_candidates.py`, `full_blocking.py`, `stack.py --rev`, `predict_test.py`.
+`code/business_entity_resolution/` contains the full pipeline (`src/`), `README.md` with step-by-step reproduction and timings, and `requirements.txt` with pinned versions. Entry points, in order: `convert_to_parquet.py`, `normalize.py`, `normalize_all.py`, `make_candidates.py dev`, `full_blocking.py train`, `train_matcher.py --rev`, `stack.py --rev --aug=0.5`, `full_blocking.py test`, `test_features.py`, `predict_test.py`.
 
 ### B. Compliance
 
-- **No external data, APIs or lookups.** Every model, dictionary and statistic is derived from the provided training and test files. The transliteration dictionary is learned from training pairs; the fallback transliteration is a rule-based character mapping (`indic-transliteration`, MIT; `anyascii`, ISC), not a lookup of any business.
+- **No external data, APIs or lookups.** Every model, dictionary and statistic is derived from the provided training and test files. The decoy-branch augmentation only copies existing training candidates; the test files were used for unlabelled counts (records per entity), never for labels. The transliteration dictionary is learned from training pairs; the fallback transliteration is a rule-based character mapping (`indic-transliteration`, MIT; `anyascii`, ISC), not a lookup of any business.
 - **Models:** LightGBM (MIT) gradient-boosted trees, far below 8B parameters. No pretrained language models are used.
 - **Libraries:** polars, pyarrow, scikit-learn, scipy, numpy, rapidfuzz, sparse_dot_topn, lightgbm (MIT / BSD / Apache-2.0).
