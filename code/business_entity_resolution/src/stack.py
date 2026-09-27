@@ -20,6 +20,7 @@ import numpy as np
 import polars as pl
 
 import config
+from augment import BRANCH, branch_features, clone_decoys, matched_records
 from features import FEATURES, build
 from make_candidates import cand_path
 from metric import load_ground_truth
@@ -102,7 +103,10 @@ def load_dev(extra: bool) -> pl.DataFrame:
     return df.with_columns(pl.col(FEATURES).cast(pl.Float32))
 
 
-def main(use_rev: bool, extra: bool):
+SIM_RATE = 0.5  # decoy-branch density that reproduces the test set (kept/entity, LB score)
+
+
+def main(use_rev: bool, extra: bool, aug: float = 0.0, branch: bool = False):
     t0 = time.time()
     df = load_dev(extra)
     feats1 = list(FEATURES)
@@ -110,14 +114,25 @@ def main(use_rev: bool, extra: bool):
         df = add_reverse_features(df, "train")
         feats1 += REV_FEATURES
     df = group_keys("train", df)
-    # one float32 matrix, then keep only a slim id/key frame (memory)
-    is_train = (df["part"] == "train").to_numpy()
-    X_all = df.select(pl.col(feats1).cast(pl.Float32)).to_numpy()
-    meta = df.select("s1_id", "cand_id", "source", "label", "nums_key", "core_key")
+    matched = matched_records(config.ground_truth_parquet())
+    val_df = df.filter(pl.col("part") == "val")
+    train_df = df.filter(pl.col("part") == "train")
     del df
-    train, val = meta.filter(pl.Series(is_train)), meta.filter(pl.Series(~is_train))
-    X, Xv = X_all[is_train], X_all[~is_train]
-    del X_all, meta
+    if aug > 0:
+        train_df = clone_decoys(train_df, matched, aug, seed=0)
+    sim_df = clone_decoys(val_df, matched, SIM_RATE, seed=1)
+    if branch:
+        train_df, val_df, sim_df = (branch_features(d) for d in (train_df, val_df, sim_df))
+        feats1 += BRANCH
+    keep =["s1_id", "cand_id", "source", "label", "nums_key", "core_key"]
+    X = train_df.select(pl.col(feats1).cast(pl.Float32)).to_numpy()
+    train = train_df.select(keep)
+    del train_df
+    Xv = val_df.select(pl.col(feats1).cast(pl.Float32)).to_numpy()
+    val = val_df.select(keep)
+    Xs = sim_df.select(pl.col(feats1).cast(pl.Float32)).to_numpy()
+    sim = sim_df.select(keep)
+    del val_df, sim_df
     buckets = np.array([_bucket(e) for e in train["s1_id"]])
     fold = (buckets * 1000).astype(int) % K_FOLDS
     stop = (buckets >= 0.16) & (buckets < 0.17)  # early-stopping slice of training entities
@@ -131,6 +146,7 @@ def main(use_rev: bool, extra: bool):
     m1.save_model(str(STAGE1_PATH), num_iteration=rounds)
     print(f"stage 1: {rounds} rounds ({time.time() - t0:.0f}s)", flush=True)
     val = val.with_columns(pl.Series("p1", m1.predict(Xv)))
+    sim = sim.with_columns(pl.Series("p1", m1.predict(Xs)))
 
     # out-of-fold stage-1 probabilities for training entities
     oof = np.zeros(train.height)
@@ -141,11 +157,12 @@ def main(use_rev: bool, extra: bool):
     train = train.with_columns(pl.Series("p1", oof))
 
     # stage-2 matrices = stage-1 features + group summaries (row order preserved)
-    train, val = stage2_features(train), stage2_features(val)
+    train, val, sim = stage2_features(train), stage2_features(val), stage2_features(sim)
     feats2 = feats1 + STAGE2_EXTRA
-    X2 = np.hstack([X, train.select(pl.col(STAGE2_EXTRA).cast(pl.Float32)).to_numpy()])
-    Xv2 = np.hstack([Xv, val.select(pl.col(STAGE2_EXTRA).cast(pl.Float32)).to_numpy()])
-    del X, Xv
+    s2x = lambda d: d.select(pl.col(STAGE2_EXTRA).cast(pl.Float32)).to_numpy()
+    X2 = np.hstack([X, s2x(train)])
+    Xv2, Xs2 = np.hstack([Xv, s2x(val)]), np.hstack([Xs, s2x(sim)])
+    del X, Xv, Xs
     m2 = fit(X2[~stop], y[~stop], feats2, es=(X2[stop], y[stop]))
     m2.save_model(str(STAGE2_PATH), num_iteration=m2.best_iteration)
     print(f"stage 2: {m2.best_iteration} rounds ({time.time() - t0:.0f}s)", flush=True)
@@ -153,13 +170,16 @@ def main(use_rev: bool, extra: bool):
     truth = load_ground_truth(config.ground_truth_parquet())
     ids = list(set(pl.read_parquet(cand_path("dev"), columns=["s1_id", "part"])
                      .filter(pl.col("part") == "val")["s1_id"]))
-    print("\n===== stage 1 alone =====")
-    evaluate_rules(val.select("s1_id", "cand_id", pl.col("p1").alias("p")), truth, ids)
-    print("\n===== stage 2 =====")
+    print("\n===== stage 2, original validation =====")
     pred = val.select("s1_id", "cand_id").with_columns(pl.Series("p", m2.predict(Xv2)))
     pred.write_parquet(config.WORK_DIR / "val_pred_stage2.parquet")
-    decision = evaluate_rules(pred, truth, ids)
-    decision.update(stacked=True, rev=use_rev)
+    evaluate_rules(pred, truth, ids)
+    # the decision rule is chosen on the test-like validation (decoy branches simulated)
+    print(f"\n===== stage 2, test-like validation (decoy branches, rate {SIM_RATE}) =====")
+    pred_s = sim.select("s1_id", "cand_id").with_columns(pl.Series("p", m2.predict(Xs2)))
+    pred_s.write_parquet(config.WORK_DIR / "sim_pred_stage2.parquet")
+    decision = evaluate_rules(pred_s, truth, ids)
+    decision.update(stacked=True, rev=use_rev, aug=aug, chosen_on=f"sim{SIM_RATE}")
     (config.WORK_DIR / "decision_stage2.json").write_text(json.dumps(decision, indent=1))
     imp = sorted(zip(feats2, m2.feature_importance("gain")), key=lambda x: -x[1])
     total = sum(g for _, g in imp)
@@ -167,4 +187,5 @@ def main(use_rev: bool, extra: bool):
 
 
 if __name__ == "__main__":
-    main("--rev" in sys.argv, "--extra" in sys.argv)
+    aug = next((float(a.split("=")[1]) for a in sys.argv if a.startswith("--aug=")), 0.0)
+    main("--rev" in sys.argv, "--extra" in sys.argv, aug, "--branch" in sys.argv)

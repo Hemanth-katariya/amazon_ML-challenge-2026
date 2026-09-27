@@ -12,6 +12,7 @@ import polars as pl
 
 import config
 import decide
+from augment import BRANCH, branch_features
 from features import Tables, attach_text, iter_chunks, pair_features
 from reverse import add_reverse_features, full_dir
 from stack import STAGE1_PATH, STAGE2_PATH, stage2_features
@@ -54,16 +55,17 @@ class Scorer:
         """f = pair features for whole S1 groups -> frame(s1_id, cand_id, p)."""
         if self.use_rev:
             f = add_reverse_features(f, self.split)
-        p1 = _predict(self.m1, f)
-        if self.m2 is None:
-            return f.select("s1_id", "cand_id").with_columns(pl.Series("p", p1))
-        f = f.with_columns(pl.Series("p1", p1))
         if "nums_key" not in f.columns:  # raw pair features (cached test features have keys)
             f = f.with_columns(
                 pl.col("core_n_b").alias("core_key"),
                 pl.col("addr_n_b").str.extract_all(r"\d+").list.unique().list.sort()
                   .list.join(" ").alias("nums_key"))
-        f = stage2_features(f)
+        if BRANCH[0] in self.m1.feature_name():
+            f = branch_features(f)
+        p1 = _predict(self.m1, f)
+        if self.m2 is None:
+            return f.select("s1_id", "cand_id").with_columns(pl.Series("p", p1))
+        f = stage2_features(f.with_columns(pl.Series("p1", p1)))
         return f.select("s1_id", "cand_id").with_columns(pl.Series("p", _predict(self.m2, f)))
 
 
