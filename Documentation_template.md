@@ -1,8 +1,8 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
-**Team Name:** [Your Team Name]
-**Team Members:** [List all team members]
-**Submission Date:** [Date]
+**Team Name:** Hemanth-katariya *(placeholder — replace before final submission)*
+**Team Members:** Hemanth Katariya *(placeholder — replace before final submission)*
+**Submission Date:** 2026-09-27
 
 ---
 
