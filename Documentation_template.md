@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution
 
-**Team Name:** Hemanth-katariya *(placeholder — replace before final submission)*
-**Team Members:** Hemanth Katariya *(placeholder — replace before final submission)*
+**Team Name:** kasukabe defence group
+**Team Members:** Abhinav Sudini, Nishanth Kumar Nelanti, Katariya Hemanth Kumar (Indian Institute of Technology (IIT), Patna)
 **Submission Date:** 2026-09-27
 
 ---
