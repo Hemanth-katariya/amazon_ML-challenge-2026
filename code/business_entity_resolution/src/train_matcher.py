@@ -24,8 +24,10 @@ FEATURE_CACHE = config.WORK_DIR / f"features_dev_v{FEATURE_VERSION}.parquet"
 MODEL_PATH = config.WORK_DIR / "lgbm.txt"
 DECISION_PATH = config.WORK_DIR / "decision.json"
 
-PARAMS = dict(objective="binary", learning_rate=0.1, num_leaves=127, min_data_in_leaf=100,
-              feature_fraction=0.8, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
+# lr 0.05 / 255 leaves: validation logloss 0.00819 vs 0.00833 for lr 0.1 / 127 leaves
+# (F0.5 0.9778 vs 0.9777); better-calibrated stage-1 probabilities feed stage 2.
+PARAMS = dict(objective="binary", learning_rate=0.05, num_leaves=255, min_data_in_leaf=50,
+              feature_fraction=0.7, bagging_fraction=0.8, bagging_freq=1, lambda_l2=1.0,
               num_threads=-1, verbose=-1)
 
 
