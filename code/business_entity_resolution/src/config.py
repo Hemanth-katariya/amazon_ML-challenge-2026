@@ -7,18 +7,17 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
+# Folder that holds code/ (the unpacked submission zip, or the repository root).
+ROOT = Path(__file__).resolve().parents[3]
+
 # Raw TSVs as shipped by the organizers (contains train/ and test/).
-RAW_DIR = Path(os.environ.get(
-    "ER_RAW_DIR",
-    r"C:\Users\heman\OneDrive - Indian Institute of Technology Patna\my acads"
-    r"\hacthons\ml challaenge\dataset\student_resource\dataset",
-))
+RAW_DIR = Path(os.environ.get("ER_RAW_DIR", ROOT / "dataset"))
 
 # Parquet copies of the raw TSVs (fast to load).
-PARQUET_DIR = Path(os.environ.get("ER_PARQUET_DIR", r"C:\ml2026\data\parquet"))
+PARQUET_DIR = Path(os.environ.get("ER_PARQUET_DIR", ROOT / "data" / "parquet"))
 
 # Intermediate artefacts (candidates, features, models).
-WORK_DIR = Path(os.environ.get("ER_WORK_DIR", r"C:\ml2026\data\work"))
+WORK_DIR = Path(os.environ.get("ER_WORK_DIR", ROOT / "data" / "work"))
 
 # Final submission files.
 OUTPUT_DIR = Path(os.environ.get(

@@ -8,20 +8,27 @@ models (LightGBM, scikit-learn and rapidfuzz are MIT/BSD licensed).
 
 ## Setup
 
+Python 3.12 (developed on 3.12.5, Windows 11; nothing is Windows-specific).
+
 ```bash
 python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt     # Windows
 # .venv/bin/python -m pip install -r requirements.txt       # Linux / macOS
 ```
 
-Paths live in `src/config.py` and can be overridden with environment variables:
+Copy the organizers' `dataset/` folder (the one that contains `train/` and `test/`)
+next to `code/`, or point `ER_RAW_DIR` at it. Paths live in `src/config.py`; the
+defaults are relative to `<root>`, the folder that holds `code/`, and each can be
+overridden with an environment variable:
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `ER_RAW_DIR` | folder with the organizers' `train/` and `test/` TSVs | local dataset folder |
-| `ER_PARQUET_DIR` | parquet copies of the TSVs | `C:\ml2026\data\parquet` |
-| `ER_WORK_DIR` | intermediate artefacts (candidates, features, model) | `C:\ml2026\data\work` |
+| `ER_RAW_DIR` | folder with the organizers' `train/` and `test/` TSVs | `<root>/dataset` |
+| `ER_PARQUET_DIR` | parquet copies of the TSVs | `<root>/data/parquet` |
+| `ER_WORK_DIR` | intermediate artefacts (candidates, features, model) | `<root>/data/work` |
 | `ER_OUTPUT_DIR` | final submission files | `output/` next to `src/` |
+
+The intermediate artefacts need about 10 GB of disk; the pipeline was run on a 16 GB machine.
 
 ## Reproduce end to end
 
